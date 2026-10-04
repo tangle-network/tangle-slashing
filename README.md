@@ -1,103 +1,87 @@
 # Tangle Slashing
 
-Reusable slashing conditions for all compute blueprints on Tangle Network.
+Evidence verification + BSM hooks for tnt-core's native slashing system.
 
-**The insight**: every compute marketplace (GPUs, TPUs, inference, storage)
-faces the same trust problem — "the operator claimed to provide X, did they
-actually provide X?" — and the answer decomposes into the same five checkable
-conditions regardless of what X is.
+**NOT a parallel slashing registry.** tnt-core already has the full lifecycle
+(proposeSlash → disputeSlash → executeSlash, with bonds, admin roles,
+commitment tracking, batch execution). This package provides what tnt-core
+deliberately leaves to blueprints:
+
+1. **Evidence verifiers** — domain-specific logic that interprets evidence
+   (GPU identity, model output, storage proof) and recommends severity
+2. **BSM hooks** — the `IBlueprintServiceManager` slashing hooks that let
+   compute blueprints customize tnt-core's slashing for their domain
+3. **Shared types** — the five universal violation types and evidence
+   envelope format, so blueprints and verifiers speak the same language
 
 ## The five universal violation types
 
-| Type | What it proves | Max severity | Evidence |
-|---|---|---|---|
-| `SERVICE_NOT_DELIVERED` | Operator accepted payment but didn't provide the service | 5% | Attestation that the service was unreachable |
-| `SERVICE_MISMATCH` | Service was provided but doesn't match what was quoted | 25% | Device identity / benchmark comparison |
-| `SERVICE_UNAVAILABLE` | Service was down during the paid period | 10% | Uptime logs with timestamps |
-| `ATTESTATION_INVALID` | TEE/security claim doesn't match reality | 100% (eject) | Fresh TEE report that contradicts the claim |
-| `LIFECYCLE_VIOLATION` | Operator didn't maintain service lifecycle (credentials, cleanup) | 1% | Access logs past expiry, stale device state |
+Every compute marketplace faces the same trust question: "did the operator
+deliver what they promised?" These five types cover all the ways the answer
+can be "no":
 
-## Architecture
+| Type | What it catches | Severity cap |
+|---|---|---|
+| SERVICE_NOT_DELIVERED | Accepted payment, no service | 5% |
+| SERVICE_MISMATCH | Wrong GPU class, wrong model, degraded service | 25% |
+| SERVICE_UNAVAILABLE | Downtime during paid period | 10% |
+| ATTESTATION_INVALID | TEE/security claim doesn't match reality | 100% (eject) |
+| LIFECYCLE_VIOLATION | Credentials not revoked, devices not freed | 1% |
+
+## How it plugs into tnt-core
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    SlashingRegistry                          │
-│                                                              │
-│  ┌──────────┐  ┌──────────────┐  ┌─────────────────────┐   │
-│  │ submit() │→ │ challenge    │→ │ execute()           │   │
-│  │          │  │ period       │  │ (permissionless)    │   │
-│  └──────────┘  └──────────────┘  └─────────────────────┘   │
-│       │               │                    │                 │
-│       ▼               ▼                    ▼                 │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │           IEvidenceVerifier (per blueprint)          │   │
-│  │  GPU: nvidia-smi + TEE report                       │   │
-│  │  Inference: model output hash                       │   │
-│  │  Storage: data availability proof                   │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                              │                                │
-│                              ▼                                │
-│                   ┌──────────────────┐                        │
-│                   │  tnt-core        │                        │
-│                   │  operator        │                        │
-│                   │  staking         │                        │
-│                   └──────────────────┘                        │
-└──────────────────────────────────────────────────────────────┘
+User (lessee) experiences bad service
+  │
+  ├─ Collects evidence (nvidia-smi, benchmark, uptime log)
+  │
+  ├─ Calls tnt-core: proposeSlash(serviceId, operator, slashBps, evidenceHash)
+  │    └─ tnt-core calls BSM.querySlashingOrigin(serviceId)
+  │         └─ SlashingHooks returns the authorized proposer
+  │
+  ├─ tnt-core opens the dispute window
+  │    └─ tnt-core calls BSM.getSlashingWindow(serviceId)
+  │         └─ SlashingHooks returns custom or default window
+  │    └─ tnt-core calls BSM.onUnappliedSlash(serviceId, operator, percent)
+  │         └─ SlashingHooks records the proposal
+  │
+  ├─ Operator disputes (posts bond): disputeSlash(slashId, reason)
+  │    └─ tnt-core calls BSM.queryDisputeOrigin(serviceId)
+  │         └─ SlashingHooks returns the designated arbiter (or 0)
+  │
+  └─ After window: executeSlash(slashId)
+       └─ tnt-core calls BSM.onSlash(serviceId, operator, percent)
+            └─ SlashingHooks records the outcome
 ```
 
-**The registry is GENERIC** (any blueprint can use it). **The verifiers are
-SPECIFIC** (each blueprint registers its own evidence verification logic).
+**The evidence verification happens OFF-CHAIN** — the proposer submits the
+evidence hash on-chain (as `evidence` in `proposeSlash`), and the verifier
+contract (registered per-blueprint) provides a view function that governance
+or the dispute resolver can call to assess the evidence.
 
 ## Usage
 
-### Blueprint side (import and register)
+### Inherit the hooks in your blueprint's BSM
 
 ```solidity
-import { ISlashingRegistry, SlashingTypes } from "tangle-slashing/contracts/src/ISlashingRegistry.sol";
+import { SlashingHooks } from "tangle-slashing/contracts/src/SlashingHooks.sol";
 
-contract MyComputeBlueprint {
-    ISlashingRegistry public slashing;
+contract GpuLeaseBlueprint is SlashingHooks {
+    constructor(address verifier) SlashingHooks(verifier) {}
 
-    constructor(address slashingRegistry) {
-        slashing = ISlashingRegistry(slashingRegistry);
-        slashing.registerVerifier(blueprintId, myVerifier);
+    // Let the lessee propose slashes:
+    function setSlashingOrigin(uint64 serviceId, address origin) external override onlyOwner {
+        slashingOrigins[serviceId] = origin;
     }
 }
 ```
 
-### User side (accuse an operator)
+### Register your domain verifier
 
 ```solidity
-slashing.submit(
-    blueprintId,
-    serviceId,
-    SlashingTypes.SERVICE_MISMATCH,
-    abi.encode(nvidiaSmiOutput, expectedClass),
-    2500 // 25% severity
-);
+GpuLeaseEvidenceVerifier verifier = new GpuLeaseEvidenceVerifier();
+GpuLeaseBlueprint bsm = new GpuLeaseBlueprint(address(verifier));
 ```
-
-### Operator side (counter with evidence)
-
-```solidity
-slashing.counter(
-    claimId,
-    abi.encode(accessLogs, deviceAllocationProof)
-);
-```
-
-## Evidence standards
-
-Each violation type has a standard evidence format (defined in
-`SlashingTypes.sol`). The registry doesn't interpret the evidence — it
-delegates to the blueprint's registered verifier. This keeps the registry
-generic and the verification domain-specific.
-
-## Severity policy
-
-Severity caps are configurable per violation type and can be updated by
-governance. Defaults are conservative (low for first offenses, maximum for
-attestation fraud).
 
 ## License
 
