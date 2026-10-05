@@ -91,26 +91,26 @@ abstract contract ComputeProviderSlashing {
     // TNT-CORE HOOKS — fully implemented, don't override
     // ═════════════════════════════════════════════════════════════
 
-    function querySlashingOrigin(uint64 serviceId) external view returns (address) {
+    function _slashingOrigin(uint64 serviceId) internal view returns (address) {
         return slashingOrigins[serviceId];
     }
 
-    function getSlashingWindow(uint64 serviceId) external view returns (bool useDefault, uint64 window) {
+    function _slashingWindow(uint64 serviceId) internal view returns (bool useDefault, uint64 window) {
         uint64 custom = customDisputeWindows[serviceId];
         if (custom == 0) return (true, 0);
         return (false, custom);
     }
 
-    function queryDisputeOrigin(uint64 serviceId) external view returns (address) {
+    function _disputeOrigin(uint64 serviceId) internal view returns (address) {
         return disputeOrigins[serviceId];
     }
 
-    function onUnappliedSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external {
+    function _recordSlashProposed(uint64 serviceId, bytes calldata offender, uint8 slashPercent) internal {
         address operator = address(bytes20(offender));
         emit SlashingProposed(serviceId, operator, SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED, pendingEvidence[serviceId][operator]);
     }
 
-    function onSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external {
+    function _recordSlashExecuted(uint64 serviceId, bytes calldata offender, uint8 slashPercent) internal {
         address operator = address(bytes20(offender));
         slashHistory[operator][serviceId] += 1;
         totalSlashes[operator] += 1;
