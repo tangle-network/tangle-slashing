@@ -20,8 +20,10 @@ For native submission, the envelope's `serviceId` is the manager's
 
 `ComputeProviderSlashing.submitEvidence` verifies before locking a pending hash
 and calling TNT's nonpayable `proposeSlash` with the verdict in basis points.
-Native failure rolls back admission. Pending evidence cannot be replaced;
-consumed hashes cannot be replayed after execution. The constructor and existing
+Native failure rolls back admission. Replay protection consumes the
+collector-signed EIP-712 digest, so a re-encoding of admitted evidence is refused,
+and evidence older than `MAX_EVIDENCE_AGE` is rejected. Pending evidence cannot be
+replaced until TNT executes or cancels its proposal. The constructor and existing
 consumer hook helpers remain; duplicate policy/reputation state is retired in
 favor of TNT. A manager exposes its existing `tangleCore()` getter.
 

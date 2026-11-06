@@ -107,6 +107,30 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
         );
     }
 
+    function testReEncodedEvidenceSharesTheSignedReplayKey() public {
+        SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.SERVICE_UNAVAILABLE;
+        bytes memory canonical = abi.encode(_signed(violation, SlashingTypes.EvidenceKind.UPTIME_LOG, COLLECTOR_KEY));
+        bytes memory padded = bytes.concat(canonical, bytes32(0));
+        (bool valid,,) = verifier.verify(violation, padded, SERVICE, OPERATOR);
+        assertTrue(valid, "the padded encoding must still verify for this case to matter");
+        assertTrue(keccak256(padded) != keccak256(canonical));
+        assertEq(
+            verifier.replayKey(violation, padded, SERVICE, OPERATOR),
+            verifier.replayKey(violation, canonical, SERVICE, OPERATOR)
+        );
+    }
+
+    function testEvidenceOlderThanTheMaximumAgeIsRejected() public {
+        SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.SERVICE_UNAVAILABLE;
+        SlashingTypes.EvidenceEnvelope memory envelope =
+            _signed(violation, SlashingTypes.EvidenceKind.UPTIME_LOG, COLLECTOR_KEY);
+        vm.warp(envelope.timestamp + verifier.MAX_EVIDENCE_AGE());
+        (bool valid,,) = verifier.verify(violation, abi.encode(envelope), SERVICE, OPERATOR);
+        assertTrue(valid);
+        vm.warp(envelope.timestamp + verifier.MAX_EVIDENCE_AGE() + 1);
+        _reject(violation, envelope, SERVICE, OPERATOR);
+    }
+
     function testOnlyCollectorAdminCanRotateAndRevokeSigningKeys() public {
         SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED;
         SlashingTypes.EvidenceEnvelope memory old =

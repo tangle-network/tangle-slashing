@@ -34,6 +34,7 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
     bytes32 private constant EVIDENCE_TYPEHASH = keccak256(
         "Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)"
     );
+    uint64 public constant MAX_EVIDENCE_AGE = 7 days;
     uint256 private constant HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     constructor(address collector) {
@@ -86,7 +87,7 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
     {
         if (
             !collectors[envelope.collector] || envelope.timestamp == 0 || envelope.timestamp > block.timestamp
-                || signature.length != 65
+                || envelope.timestamp + MAX_EVIDENCE_AGE < block.timestamp || signature.length != 65
         ) return false;
         bytes32 r;
         bytes32 s;
@@ -99,15 +100,32 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
         return (v == 27 || v == 28) && uint256(s) <= HALF_ORDER && ecrecover(digest, v, r, s) == envelope.collector;
     }
 
+    function replayKey(
+        SlashingTypes.ViolationType violation,
+        bytes calldata evidence,
+        bytes32 serviceId,
+        address operator
+    ) external view override returns (bytes32) {
+        (SlashingTypes.EvidenceEnvelope memory envelope,) = _unwrap(evidence);
+        return evidenceDigest(violation, envelope, serviceId, operator);
+    }
+
+    function _unwrap(bytes calldata evidence)
+        internal
+        pure
+        returns (SlashingTypes.EvidenceEnvelope memory envelope, bytes memory signature)
+    {
+        envelope = abi.decode(evidence, (SlashingTypes.EvidenceEnvelope));
+        (envelope.payload, signature) = abi.decode(envelope.payload, (bytes, bytes));
+    }
+
     function verify(SlashingTypes.ViolationType violation, bytes calldata evidence, bytes32 serviceId, address operator)
         external
         view
         override
         returns (bool valid, uint256 adjustedSeverityBps, string memory description)
     {
-        SlashingTypes.EvidenceEnvelope memory envelope = abi.decode(evidence, (SlashingTypes.EvidenceEnvelope));
-        bytes memory signature;
-        (envelope.payload, signature) = abi.decode(envelope.payload, (bytes, bytes));
+        (SlashingTypes.EvidenceEnvelope memory envelope, bytes memory signature) = _unwrap(evidence);
         if (!_authenticated(envelope, evidenceDigest(violation, envelope, serviceId, operator), signature)) {
             return (false, 0, "unauthenticated collector evidence");
         }
