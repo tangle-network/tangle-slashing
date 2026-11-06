@@ -1,27 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import { SlashingTypes } from "../src/SlashingTypes.sol";
-import { IEvidenceVerifier } from "../src/IEvidenceVerifier.sol";
+import {SlashingTypes} from "./SlashingTypes.sol";
+import {IEvidenceVerifier} from "./IEvidenceVerifier.sol";
 
-/// @title GpuLeaseEvidenceVerifier — reference verifier for GPU lease blueprints.
-/// @notice This is the reference implementation showing how a blueprint-specific
-///         verifier works. It interprets GPU-domain evidence (nvidia-smi output,
-///         TEE reports, benchmark results) and returns a verdict.
-///
-///         Other blueprints (inference, storage, TPU) provide their own
-///         verifiers with the same interface but different domain logic.
+/// @notice GPU evidence endorsed by a blueprint's designated collector.
+/// @dev EvidenceEnvelope.payload is abi.encode(rawPayload, signature); the signature
+///      covers evidenceDigest with the raw payload, before wrapping it.
 contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
-    using SlashingTypes for *;
-
-    /// @notice Expected GPU device information for a service.
     struct ExpectedDevice {
-        string gpuClass;       // "h100", "a100-80gb", etc.
+        string gpuClass;
         bool teeRequired;
-        bytes32 deviceUuid;    // operator-advertised UUID
+        bytes32 deviceUuid;
     }
 
-    /// @notice Actual GPU device information from evidence.
     struct ActualDevice {
         string gpuClass;
         bytes32 deviceUuid;
@@ -29,164 +21,156 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
         string driver;
     }
 
-    /// @notice Benchmark result.
     struct Benchmark {
-        uint256 tflops;        // measured performance
-        uint256 baselineTflops; // expected for this class
+        uint256 tflops;
+        uint256 baselineTflops;
     }
 
-    // ═════════════════════════════════════════════════════════════
-    // VERIFICATION
-    // ═════════════════════════════════════════════════════════════
+    address public immutable trustedCollector;
+    bytes32 private constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant EVIDENCE_TYPEHASH = keccak256(
+        "Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)"
+    );
+    bytes32 private constant COUNTER_TYPEHASH =
+        keccak256("CounterEvidence(bytes32 claimId,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash)");
+    uint256 private constant HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
-    function verify(
+    constructor(address collector) {
+        require(collector != address(0), "ZERO_COLLECTOR");
+        trustedCollector = collector;
+    }
+
+    function evidenceDigest(
         SlashingTypes.ViolationType violation,
-        bytes calldata evidence,
+        SlashingTypes.EvidenceEnvelope memory envelope,
         bytes32 serviceId,
         address operator
-    ) external pure override returns (bool valid, uint256 adjustedSeverityBps, string memory description) {
-        SlashingTypes.EvidenceEnvelope memory envelope = abi.decode(
-            evidence,
-            (SlashingTypes.EvidenceEnvelope)
+    ) public view returns (bytes32) {
+        return _digest(
+            keccak256(
+                abi.encode(
+                    EVIDENCE_TYPEHASH,
+                    violation,
+                    envelope.kind,
+                    envelope.timestamp,
+                    envelope.collector,
+                    keccak256(envelope.payload),
+                    serviceId,
+                    operator
+                )
+            )
         );
-
-        if (violation == SlashingTypes.ViolationType.SERVICE_MISMATCH) {
-            return _verifyMismatch(envelope, operator);
-        } else if (violation == SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED) {
-            return _verifyNotDelivered(envelope, operator);
-        } else if (violation == SlashingTypes.ViolationType.SERVICE_UNAVAILABLE) {
-            return _verifyUnavailable(envelope, operator);
-        } else if (violation == SlashingTypes.ViolationType.ATTESTATION_INVALID) {
-            return _verifyAttestation(envelope, operator);
-        } else if (violation == SlashingTypes.ViolationType.LIFECYCLE_VIOLATION) {
-            return _verifyLifecycle(envelope, operator);
-        }
-
-        return (false, 0, "unknown violation type");
     }
 
-    function verifyCounter(
-        bytes32 claimId,
-        bytes calldata counterEvidence
-    ) external pure override returns (bool valid, string memory description) {
-        SlashingTypes.EvidenceEnvelope memory envelope = abi.decode(
-            counterEvidence,
-            (SlashingTypes.EvidenceEnvelope)
+    function counterDigest(bytes32 claimId, SlashingTypes.EvidenceEnvelope memory envelope)
+        public
+        view
+        returns (bytes32)
+    {
+        return _digest(
+            keccak256(
+                abi.encode(
+                    COUNTER_TYPEHASH,
+                    claimId,
+                    envelope.kind,
+                    envelope.timestamp,
+                    envelope.collector,
+                    keccak256(envelope.payload)
+                )
+            )
         );
-
-        if (envelope.kind == SlashingTypes.EvidenceKind.OPERATOR_ADMISSION) {
-            // The operator admits to providing the service but disputes the
-            // specific claim. This is valid counter-evidence that warrants
-            // governance review.
-            return (true, "operator admission: service was provided, details disputed");
-        }
-
-        if (envelope.kind == SlashingTypes.EvidenceKind.THIRD_PARTY_ATTESTATION) {
-            // An independent verifier's report. Valid but should be checked
-            // by governance.
-            return (true, "third-party attestation submitted for review");
-        }
-
-        return (false, "unrecognized counter-evidence kind");
     }
 
-    // ═════════════════════════════════════════════════════════════
-    // DOMAIN-SPECIFIC VERIFICATION
-    // ═════════════════════════════════════════════════════════════
+    function _digest(bytes32 structHash) internal view returns (bytes32) {
+        bytes32 domain = keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH, keccak256("GpuLeaseEvidenceVerifier"), keccak256("1"), block.chainid, address(this)
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domain, structHash));
+    }
 
-    function _verifyMismatch(
-        SlashingTypes.EvidenceEnvelope memory envelope,
-        address operator
-    ) internal pure returns (bool, uint256, string memory) {
-        // For SERVICE_MISMATCH, the payload should contain both the expected
-        // device info (from the quote) and the actual device info (from
-        // nvidia-smi or TEE report).
-        (ExpectedDevice memory expected, ActualDevice memory actual) =
-            abi.decode(envelope.payload, (ExpectedDevice, ActualDevice));
-
-        // Check: GPU class matches
-        bool classMatches = keccak256(bytes(expected.gpuClass)) == keccak256(bytes(actual.gpuClass));
-
-        // Check: device UUID matches (if the operator advertised one)
-        bool uuidMatches = expected.deviceUuid == bytes32(0) || expected.deviceUuid == actual.deviceUuid;
-
-        if (!classMatches) {
-            return (
-                true,
-                2500, // full 25% severity
-                string(abi.encodePacked("GPU class mismatch: expected ", expected.gpuClass, ", got ", actual.gpuClass))
-            );
+    function _authenticated(SlashingTypes.EvidenceEnvelope memory envelope, bytes32 digest, bytes memory signature)
+        internal
+        view
+        returns (bool)
+    {
+        if (
+            envelope.collector != trustedCollector || envelope.timestamp == 0 || envelope.timestamp > block.timestamp
+                || signature.length != 65
+        ) return false;
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly ("memory-safe") {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
         }
+        return (v == 27 || v == 28) && uint256(s) <= HALF_ORDER && ecrecover(digest, v, r, s) == trustedCollector;
+    }
 
-        if (!uuidMatches) {
-            return (
-                true,
-                2000, // 20% — UUID mismatch is strong evidence
-                "device UUID mismatch: operator advertised a different device"
-            );
+    function verify(SlashingTypes.ViolationType violation, bytes calldata evidence, bytes32 serviceId, address operator)
+        external
+        view
+        override
+        returns (bool valid, uint256 adjustedSeverityBps, string memory description)
+    {
+        SlashingTypes.EvidenceEnvelope memory envelope = abi.decode(evidence, (SlashingTypes.EvidenceEnvelope));
+        bytes memory signature;
+        (envelope.payload, signature) = abi.decode(envelope.payload, (bytes, bytes));
+        if (!_authenticated(envelope, evidenceDigest(violation, envelope, serviceId, operator), signature)) {
+            return (false, 0, "unauthenticated collector evidence");
         }
+        if (violation == SlashingTypes.ViolationType.SERVICE_MISMATCH) return _verifyMismatch(envelope);
+        SlashingTypes.EvidenceKind expected = SlashingTypes.EvidenceKind.DEVICE_ATTESTATION;
+        if (violation == SlashingTypes.ViolationType.SERVICE_UNAVAILABLE) {
+            expected = SlashingTypes.EvidenceKind.UPTIME_LOG;
+        }
+        if (violation == SlashingTypes.ViolationType.LIFECYCLE_VIOLATION) {
+            expected = SlashingTypes.EvidenceKind.ACCESS_LOG;
+        }
+        if (envelope.kind != expected) return (false, 0, "wrong evidence kind");
+        return (true, SlashingTypes.defaultSeverityCap(violation), "collector attests to the service violation");
+    }
 
-        // Class and UUID match — check performance if benchmark data present
+    function verifyCounter(bytes32 claimId, bytes calldata counterEvidence)
+        external
+        view
+        override
+        returns (bool valid, string memory description)
+    {
+        SlashingTypes.EvidenceEnvelope memory envelope = abi.decode(counterEvidence, (SlashingTypes.EvidenceEnvelope));
+        bytes memory signature;
+        (envelope.payload, signature) = abi.decode(envelope.payload, (bytes, bytes));
+        if (!_authenticated(envelope, counterDigest(claimId, envelope), signature)) {
+            return (false, "unauthenticated counter-evidence");
+        }
+        valid = envelope.kind == SlashingTypes.EvidenceKind.OPERATOR_ADMISSION
+            || envelope.kind == SlashingTypes.EvidenceKind.THIRD_PARTY_ATTESTATION;
+        return (valid, valid ? "collector counter-evidence submitted for review" : "unrecognized counter-evidence kind");
+    }
+
+    function _verifyMismatch(SlashingTypes.EvidenceEnvelope memory envelope)
+        internal
+        pure
+        returns (bool, uint256, string memory)
+    {
         if (envelope.kind == SlashingTypes.EvidenceKind.PERFORMANCE_BENCHMARK) {
             Benchmark memory bench = abi.decode(envelope.payload, (Benchmark));
-            if (bench.tflops < bench.baselineTflops * 50 / 100) {
-                // Performance below 50% of baseline
-                return (
-                    true,
-                    1500, // 15% — degraded but not wrong class
-                    "performance below 50% of class baseline"
-                );
-            }
+            bool degraded = bench.tflops < bench.baselineTflops / 2;
+            return (degraded, degraded ? 1500 : 0, "performance compared to class baseline");
         }
-
+        if (envelope.kind != SlashingTypes.EvidenceKind.DEVICE_ATTESTATION) return (false, 0, "wrong evidence kind");
+        (ExpectedDevice memory expected, ActualDevice memory actual) =
+            abi.decode(envelope.payload, (ExpectedDevice, ActualDevice));
+        if (keccak256(bytes(expected.gpuClass)) != keccak256(bytes(actual.gpuClass))) {
+            return (true, 2500, "GPU class mismatch");
+        }
+        if (expected.deviceUuid != bytes32(0) && expected.deviceUuid != actual.deviceUuid) {
+            return (true, 2000, "device UUID mismatch");
+        }
         return (false, 0, "no mismatch detected");
-    }
-
-    function _verifyNotDelivered(
-        SlashingTypes.EvidenceEnvelope memory envelope,
-        address operator
-    ) internal pure returns (bool, uint256, string memory) {
-        // For NOT_DELIVERED, the evidence should be a device attestation
-        // showing the service was unreachable or non-existent.
-        if (envelope.kind != SlashingTypes.EvidenceKind.DEVICE_ATTESTATION) {
-            return (false, 0, "expected device attestation evidence");
-        }
-        // In production, verify the attestation's cryptographic signature.
-        // For this reference implementation, we check the timestamp is
-        // within the service period.
-        return (true, 500, "service was not reachable during the paid period");
-    }
-
-    function _verifyUnavailable(
-        SlashingTypes.EvidenceEnvelope memory envelope,
-        address operator
-    ) internal pure returns (bool, uint256, string memory) {
-        if (envelope.kind != SlashingTypes.EvidenceKind.UPTIME_LOG) {
-            return (false, 0, "expected uptime log evidence");
-        }
-        // Parse the uptime log and calculate availability percentage.
-        return (true, 1000, "service was unavailable during the paid period");
-    }
-
-    function _verifyAttestation(
-        SlashingTypes.EvidenceEnvelope memory envelope,
-        address operator
-    ) internal pure returns (bool, uint256, string memory) {
-        if (envelope.kind != SlashingTypes.EvidenceKind.DEVICE_ATTESTATION) {
-            return (false, 0, "expected device attestation evidence");
-        }
-        // TEE attestation verification would go here.
-        // Full severity — this is the most serious violation.
-        return (true, 10000, "TEE attestation does not match claimed security level");
-    }
-
-    function _verifyLifecycle(
-        SlashingTypes.EvidenceEnvelope memory envelope,
-        address operator
-    ) internal pure returns (bool, uint256, string memory) {
-        if (envelope.kind != SlashingTypes.EvidenceKind.ACCESS_LOG) {
-            return (false, 0, "expected access log evidence");
-        }
-        return (true, 100, "credential used after lease expiry");
     }
 }
