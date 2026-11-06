@@ -26,7 +26,9 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
         uint256 baselineTflops;
     }
 
-    address public immutable trustedCollector;
+    address public immutable collectorAdmin;
+    mapping(address => bool) public collectors;
+    event CollectorUpdated(address indexed collector, bool enabled);
     bytes32 private constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 private constant EVIDENCE_TYPEHASH = keccak256(
@@ -36,7 +38,14 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
 
     constructor(address collector) {
         require(collector != address(0), "ZERO_COLLECTOR");
-        trustedCollector = collector;
+        collectorAdmin = msg.sender;
+        collectors[collector] = true;
+    }
+
+    function setCollector(address collector, bool enabled) external {
+        require(msg.sender == collectorAdmin && collector != address(0), "COLLECTOR_ADMIN_REQUIRED");
+        collectors[collector] = enabled;
+        emit CollectorUpdated(collector, enabled);
     }
 
     function evidenceDigest(
@@ -76,7 +85,7 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
         returns (bool)
     {
         if (
-            envelope.collector != trustedCollector || envelope.timestamp == 0 || envelope.timestamp > block.timestamp
+            !collectors[envelope.collector] || envelope.timestamp == 0 || envelope.timestamp > block.timestamp
                 || signature.length != 65
         ) return false;
         bytes32 r;
@@ -87,7 +96,7 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
             s := mload(add(signature, 64))
             v := byte(0, mload(add(signature, 96)))
         }
-        return (v == 27 || v == 28) && uint256(s) <= HALF_ORDER && ecrecover(digest, v, r, s) == trustedCollector;
+        return (v == 27 || v == 28) && uint256(s) <= HALF_ORDER && ecrecover(digest, v, r, s) == envelope.collector;
     }
 
     function verify(SlashingTypes.ViolationType violation, bytes calldata evidence, bytes32 serviceId, address operator)
@@ -101,6 +110,10 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
         (envelope.payload, signature) = abi.decode(envelope.payload, (bytes, bytes));
         if (!_authenticated(envelope, evidenceDigest(violation, envelope, serviceId, operator), signature)) {
             return (false, 0, "unauthenticated collector evidence");
+        }
+        // Collector endorsement is not a cryptographic verdict on an operator's report.
+        if (violation == SlashingTypes.ViolationType.ATTESTATION_INVALID) {
+            return (false, 0, "attestation proof unsupported");
         }
         if (violation == SlashingTypes.ViolationType.SERVICE_MISMATCH) return _verifyMismatch(envelope);
         SlashingTypes.EvidenceKind expected = SlashingTypes.EvidenceKind.DEVICE_ATTESTATION;
