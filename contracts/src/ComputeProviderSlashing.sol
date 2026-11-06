@@ -3,9 +3,8 @@ pragma solidity ^0.8.26;
 
 import { SlashingTypes } from "./SlashingTypes.sol";
 
-/// @title ComputeProviderSlashing — inherit this, get working slashing.
-///
-/// This is NOT an interface or an abstract contract you implement.
+/// @notice Shared evidence records, severity policy, and tnt-core hook helpers.
+abstract contract you implement.
 /// Inherit from this in your compute blueprint's BSM and you get:
 ///
 ///   ✓ All tnt-core IBlueprintServiceManager slashing hooks implemented
@@ -29,10 +28,6 @@ import { SlashingTypes } from "./SlashingTypes.sol";
 /// That's it. Your blueprint now has slashing.
 abstract contract ComputeProviderSlashing {
     using SlashingTypes for *;
-
-    // ═════════════════════════════════════════════════════════════
-    // STATE (inherited by your blueprint)
-    // ═════════════════════════════════════════════════════════════
 
     /// @notice Per-blueprint evidence verifier (YOUR domain logic).
     address public slashingVerifier;
@@ -65,19 +60,11 @@ abstract contract ComputeProviderSlashing {
     ///         Set when a user submits evidence; cleared on resolution.
     mapping(uint64 => mapping(address => bytes32)) public pendingEvidence;
 
-    // ═════════════════════════════════════════════════════════════
-    // EVENTS
-    // ═════════════════════════════════════════════════════════════
-
     event SlashingProposed(uint64 indexed serviceId, address indexed operator, SlashingTypes.ViolationType violation, bytes32 evidenceHash);
     event SlashingExecuted(uint64 indexed serviceId, address indexed operator, uint8 slashPercent);
     event SlashingCounterSubmitted(uint64 indexed serviceId, address indexed operator, bytes32 counterHash);
     event VerifierUpdated(address indexed oldVerifier, address indexed newVerifier);
     event SeverityCapUpdated(SlashingTypes.ViolationType indexed violation, uint256 newCap);
-
-    // ═════════════════════════════════════════════════════════════
-    // CONSTRUCTOR — provide your verifier, get everything else free
-    // ═════════════════════════════════════════════════════════════
 
     constructor(address _slashingVerifier) {
         slashingVerifier = _slashingVerifier;
@@ -86,10 +73,6 @@ abstract contract ComputeProviderSlashing {
             severityCaps[i] = SlashingTypes.defaultSeverityCap(SlashingTypes.ViolationType(i));
         }
     }
-
-    // ═════════════════════════════════════════════════════════════
-    // TNT-CORE HOOKS — fully implemented, don't override
-    // ═════════════════════════════════════════════════════════════
 
     function _slashingOrigin(uint64 serviceId) internal view returns (address) {
         return slashingOrigins[serviceId];
@@ -118,10 +101,6 @@ abstract contract ComputeProviderSlashing {
         emit SlashingExecuted(serviceId, operator, slashPercent);
     }
 
-    // ═════════════════════════════════════════════════════════════
-    // EVIDENCE SUBMISSION — users call this before proposing a slash
-    // ═════════════════════════════════════════════════════════════
-
     /// @notice Submit evidence for a potential slashing claim.
     /// @dev Call this BEFORE calling tnt-core's proposeSlash. The evidence
     ///      hash is stored here so the hooks can reference it when tnt-core
@@ -146,10 +125,6 @@ abstract contract ComputeProviderSlashing {
         emit SlashingCounterSubmitted(serviceId, msg.sender, counterHash);
     }
 
-    // ═════════════════════════════════════════════════════════════
-    // VIEWS — other contracts and UIs call these
-    // ═════════════════════════════════════════════════════════════
-
     /// @notice Get the recommended severity for a violation type.
     function recommendedSeverity(SlashingTypes.ViolationType violation) external view returns (uint256) {
         return severityCaps[uint8(violation)];
@@ -159,10 +134,6 @@ abstract contract ComputeProviderSlashing {
     function operatorReputation(address operator) external view returns (uint256 totalSlashes_, uint256 lastSlashPercent) {
         return (totalSlashes[operator], 0);
     }
-
-    // ═════════════════════════════════════════════════════════════
-    // ADMIN — blueprint owner configures (not governance)
-    // ═════════════════════════════════════════════════════════════
 
     function _setSlashingOrigin(uint64 serviceId, address origin) internal {
         slashingOrigins[serviceId] = origin;
