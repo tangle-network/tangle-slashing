@@ -4,6 +4,11 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {GpuLeaseEvidenceVerifier} from "../src/GpuLeaseEvidenceVerifier.sol";
 import {SlashingTypes} from "../src/SlashingTypes.sol";
+import {ComputeProviderSlashing} from "../src/ComputeProviderSlashing.sol";
+
+contract EvidenceManager is ComputeProviderSlashing {
+    constructor(address verifier) ComputeProviderSlashing(verifier) {}
+}
 
 contract GpuLeaseEvidenceIntegrationTest is Test {
     GpuLeaseEvidenceVerifier verifier;
@@ -94,6 +99,39 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
                 OPERATOR
             );
         }
+    }
+
+    function testUnauthenticatedEvidenceCannotBecomeAPendingClaim() public {
+        EvidenceManager origin = new EvidenceManager(address(verifier));
+        (bool accepted,) = address(origin)
+            .call(
+                abi.encodeCall(
+                    origin.submitEvidence,
+                    (
+                        1,
+                        OPERATOR,
+                        SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED,
+                        abi.encode(_envelope(SlashingTypes.EvidenceKind.DEVICE_ATTESTATION, ""))
+                    )
+                )
+            );
+        assertFalse(accepted, "origin accepted evidence its configured verifier rejects");
+        assertEq(origin.pendingEvidence(1, OPERATOR), bytes32(0));
+    }
+
+    function testMatchingDevicePayloadDoesNotProveInvalidAttestation() public {
+        SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.ATTESTATION_INVALID;
+        SlashingTypes.EvidenceEnvelope memory envelope = _envelope(SlashingTypes.EvidenceKind.DEVICE_ATTESTATION, "");
+        bytes32 uuid = keccak256("delivered device");
+        envelope.payload = abi.encode(
+            GpuLeaseEvidenceVerifier.ExpectedDevice("nvidia-h100", false, uuid),
+            GpuLeaseEvidenceVerifier.ActualDevice("nvidia-h100", uuid, 80_000, "reported-driver")
+        );
+        envelope.payload =
+            abi.encode(envelope.payload, _signature(_digest(violation, envelope, SERVICE, OPERATOR), COLLECTOR_KEY));
+        (bool valid, uint256 severity,) = verifier.verify(violation, abi.encode(envelope), SERVICE, OPERATOR);
+        assertFalse(valid, "matching device payload was treated as an invalid attestation");
+        assertEq(severity, 0, "no invalid attestation was proven but full stake was recommended");
     }
 
     function _envelope(SlashingTypes.EvidenceKind kind, bytes memory signature)
