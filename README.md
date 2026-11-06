@@ -1,86 +1,50 @@
 # Tangle Slashing
 
-Evidence verification + BSM hooks for tnt-core's native slashing system.
+Domain evidence verification and Blueprint Service Manager helpers for tnt-core's
+native slashing lifecycle. tnt-core owns proposal bonds, disputes, execution,
+and staking; this package supplies the evidence verdict and hook helpers.
 
-**NOT a parallel slashing registry.** tnt-core already has the full lifecycle
-(proposeSlash → disputeSlash → executeSlash, with bonds, admin roles,
-commitment tracking, batch execution). This package provides what tnt-core
-deliberately leaves to blueprints:
+`SlashingTypes.defaultSeverityCap` owns the supported violations and their caps.
 
-1. **Evidence verifiers** — domain-specific logic that interprets evidence
-   (GPU identity, model output, storage proof) and recommends severity
-2. **BSM hooks** — the `IBlueprintServiceManager` slashing hooks that let
-   compute blueprints customize tnt-core's slashing for their domain
-3. **Shared types** — the five universal violation types and evidence
-   envelope format, so blueprints and verifiers speak the same language
+## GPU collector signatures
 
-## The five universal violation types
+Deploy `new GpuLeaseEvidenceVerifier(trustedCollector)` with a nonzero collector
+address whose measurements your blueprint trusts. Changing collectors requires
+a new verifier; inherited BSM administration can select that verifier.
 
-Every compute marketplace faces the same trust question: "did the operator
-deliver what they promised?" These five types cover all the ways the answer
-can be "no":
+The existing `SlashingTypes.EvidenceEnvelope` ABI is retained. To submit evidence:
 
-| Type | What it catches | Severity cap |
-|---|---|---|
-| SERVICE_NOT_DELIVERED | Accepted payment, no service | 5% |
-| SERVICE_MISMATCH | Wrong GPU class, wrong model, degraded service | 25% |
-| SERVICE_UNAVAILABLE | Downtime during paid period | 10% |
-| ATTESTATION_INVALID | TEE/security claim doesn't match reality | 100% (eject) |
-| LIFECYCLE_VIOLATION | Credentials not revoked, devices not freed | 1% |
+1. Populate the envelope with its evidence kind, collection timestamp, designated
+   collector, and **raw** domain payload.
+2. Obtain `evidenceDigest(violation, envelope, serviceId, operator)` and sign that
+   EIP-712 digest with the collector's key. The type is
+   `Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)`.
+3. Replace `envelope.payload` with `abi.encode(rawPayload, signature)` and pass
+   `abi.encode(envelope)` to `verify` through `IEvidenceVerifier`.
 
-## How it plugs into tnt-core
+The domain is `GpuLeaseEvidenceVerifier`, version `1`, with the current chain id
+and verifier address. Signatures are canonical 65-byte secp256k1 `(r,s,v)` with
+`v` equal to 27 or 28. Every verdict authenticates the configured collector;
+unsigned legacy envelopes cannot support slashing. Zero or future timestamps
+are rejected. The collector attests that the signed event happened during the
+paid service period; this reference contract cannot independently observe a GPU
+or look up a lease's period.
 
-```
-User (lessee) experiences bad service
-  │
-  ├─ Collects evidence (nvidia-smi, benchmark, uptime log)
-  │
-  ├─ Calls tnt-core: proposeSlash(serviceId, operator, slashBps, evidenceHash)
-  │    └─ tnt-core calls BSM.querySlashingOrigin(serviceId)
-  │         └─ SlashingHooks returns the authorized proposer
-  │
-  ├─ tnt-core opens the dispute window
-  │    └─ tnt-core calls BSM.getSlashingWindow(serviceId)
-  │         └─ SlashingHooks returns custom or default window
-  │    └─ tnt-core calls BSM.onUnappliedSlash(serviceId, operator, percent)
-  │         └─ SlashingHooks records the proposal
-  │
-  ├─ Operator disputes (posts bond): disputeSlash(slashId, reason)
-  │    └─ tnt-core calls BSM.queryDisputeOrigin(serviceId)
-  │         └─ SlashingHooks returns the designated arbiter (or 0)
-  │
-  └─ After window: executeSlash(slashId)
-       └─ tnt-core calls BSM.onSlash(serviceId, operator, percent)
-            └─ SlashingHooks records the outcome
-```
+A verdict is a stateless assessment: replay within the same claim is handled by
+tnt-core's slashing lifecycle, not by this view contract. The unused speculative
+counter-verdict API and parallel claim lifecycle types have been removed; BSM
+counter-evidence submission remains an input to governance review.
 
-**The evidence verification happens OFF-CHAIN** — the proposer submits the
-evidence hash on-chain (as `evidence` in `proposeSlash`), and the verifier
-contract (registered per-blueprint) provides a view function that governance
-or the dispute resolver can call to assess the evidence.
+`ComputeProviderSlashing` provides internal origin, window, recording and admin
+helpers for a BSM to connect to tnt-core. Its `submitEvidence` records a hash;
+it does not execute a slash or validate an envelope. Governance or the dispute
+resolver calls the registered verifier before assessing a claim.
 
-## Usage
+## Checks
 
-### Inherit the hooks in your blueprint's BSM
-
-```solidity
-import { SlashingHooks } from "tangle-slashing/contracts/src/SlashingHooks.sol";
-
-contract GpuLeaseBlueprint is SlashingHooks {
-    constructor(address verifier) SlashingHooks(verifier) {}
-
-    // Let the lessee propose slashes:
-    function setSlashingOrigin(uint64 serviceId, address origin) external override onlyOwner {
-        slashingOrigins[serviceId] = origin;
-    }
-}
-```
-
-### Register your domain verifier
-
-```solidity
-GpuLeaseEvidenceVerifier verifier = new GpuLeaseEvidenceVerifier();
-GpuLeaseBlueprint bsm = new GpuLeaseBlueprint(address(verifier));
+```sh
+forge soldeer install
+forge test
 ```
 
 ## License
