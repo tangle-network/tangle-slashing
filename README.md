@@ -4,13 +4,7 @@ Domain evidence verification and Blueprint Service Manager helpers for tnt-core'
 native slashing lifecycle. tnt-core owns proposal bonds, disputes, execution,
 and staking; this package supplies the evidence verdict and hook helpers.
 
-| Violation | Maximum severity |
-|---|---|
-| `SERVICE_NOT_DELIVERED` | 5% |
-| `SERVICE_MISMATCH` | 25% |
-| `SERVICE_UNAVAILABLE` | 10% |
-| `ATTESTATION_INVALID` | 100% |
-| `LIFECYCLE_VIOLATION` | 1% |
+`SlashingTypes.defaultSeverityCap` owns the supported violations and their caps.
 
 ## GPU collector signatures
 
@@ -36,12 +30,10 @@ are rejected. The collector attests that the signed event happened during the
 paid service period; this reference contract cannot independently observe a GPU
 or look up a lease's period.
 
-Counter-evidence uses the same payload wrapper and `counterDigest(claimId,
-envelope)`, with the type
-`CounterEvidence(bytes32 claimId,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash)`.
-It is bound to that claim and domain, and remains an input to governance review.
 A verdict is a stateless assessment: replay within the same claim is handled by
-tnt-core's slashing lifecycle, not by this view contract.
+tnt-core's slashing lifecycle, not by this view contract. The unused speculative
+counter-verdict API and parallel claim lifecycle types have been removed; BSM
+counter-evidence submission remains an input to governance review.
 
 `ComputeProviderSlashing` provides internal origin, window, recording and admin
 helpers for a BSM to connect to tnt-core. Its `submitEvidence` records a hash;

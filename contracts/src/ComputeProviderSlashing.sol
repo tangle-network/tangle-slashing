@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
 import {SlashingTypes} from "./SlashingTypes.sol";
 
 /// @notice Evidence records, severity policy, and internal tnt-core hook helpers.
 abstract contract ComputeProviderSlashing {
-    using SlashingTypes for *;
-
     address public slashingVerifier;
 
     mapping(uint64 => address) public slashingOrigins;

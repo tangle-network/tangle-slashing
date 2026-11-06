@@ -32,8 +32,6 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
     bytes32 private constant EVIDENCE_TYPEHASH = keccak256(
         "Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)"
     );
-    bytes32 private constant COUNTER_TYPEHASH =
-        keccak256("CounterEvidence(bytes32 claimId,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash)");
     uint256 private constant HALF_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     constructor(address collector) {
@@ -58,25 +56,6 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
                     keccak256(envelope.payload),
                     serviceId,
                     operator
-                )
-            )
-        );
-    }
-
-    function counterDigest(bytes32 claimId, SlashingTypes.EvidenceEnvelope memory envelope)
-        public
-        view
-        returns (bytes32)
-    {
-        return _digest(
-            keccak256(
-                abi.encode(
-                    COUNTER_TYPEHASH,
-                    claimId,
-                    envelope.kind,
-                    envelope.timestamp,
-                    envelope.collector,
-                    keccak256(envelope.payload)
                 )
             )
         );
@@ -133,23 +112,6 @@ contract GpuLeaseEvidenceVerifier is IEvidenceVerifier {
         }
         if (envelope.kind != expected) return (false, 0, "wrong evidence kind");
         return (true, SlashingTypes.defaultSeverityCap(violation), "collector attests to the service violation");
-    }
-
-    function verifyCounter(bytes32 claimId, bytes calldata counterEvidence)
-        external
-        view
-        override
-        returns (bool valid, string memory description)
-    {
-        SlashingTypes.EvidenceEnvelope memory envelope = abi.decode(counterEvidence, (SlashingTypes.EvidenceEnvelope));
-        bytes memory signature;
-        (envelope.payload, signature) = abi.decode(envelope.payload, (bytes, bytes));
-        if (!_authenticated(envelope, counterDigest(claimId, envelope), signature)) {
-            return (false, "unauthenticated counter-evidence");
-        }
-        valid = envelope.kind == SlashingTypes.EvidenceKind.OPERATOR_ADMISSION
-            || envelope.kind == SlashingTypes.EvidenceKind.THIRD_PARTY_ATTESTATION;
-        return (valid, valid ? "collector counter-evidence submitted for review" : "unrecognized counter-evidence kind");
     }
 
     function _verifyMismatch(SlashingTypes.EvidenceEnvelope memory envelope)

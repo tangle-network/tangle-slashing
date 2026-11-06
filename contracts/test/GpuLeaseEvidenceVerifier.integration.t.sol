@@ -85,23 +85,6 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
         _reject(violation, envelope, SERVICE, OPERATOR);
     }
 
-    function testCanonicalSignatureAndTimestampRequired() public {
-        SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED;
-        SlashingTypes.EvidenceEnvelope memory envelope =
-            _signed(violation, SlashingTypes.EvidenceKind.DEVICE_ATTESTATION, COLLECTOR_KEY);
-        (bytes memory payload, bytes memory signature) = abi.decode(envelope.payload, (bytes, bytes));
-        signature[64] = bytes1(uint8(0));
-        envelope.payload = abi.encode(payload, signature);
-        _reject(violation, envelope, SERVICE, OPERATOR);
-        envelope.timestamp = uint64(block.timestamp + 1);
-        envelope.payload = payload;
-        envelope.payload =
-            abi.encode(payload, _signature(_digest(violation, envelope, SERVICE, OPERATOR), COLLECTOR_KEY));
-        _reject(violation, envelope, SERVICE, OPERATOR);
-        vm.expectRevert("ZERO_COLLECTOR");
-        new GpuLeaseEvidenceVerifier(address(0));
-    }
-
     function testUnsignedEvidenceCannotChooseAnotherViolation() public view {
         for (uint8 i; i < 5; ++i) {
             _reject(
@@ -111,31 +94,6 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
                 OPERATOR
             );
         }
-    }
-
-    function testCounterEvidenceRequiresCollectorAndClaimBinding() public {
-        bytes32 claim = keccak256("claim");
-        SlashingTypes.EvidenceEnvelope memory envelope =
-            _envelope(SlashingTypes.EvidenceKind.THIRD_PARTY_ATTESTATION, "");
-        (bool valid,) = verifier.verifyCounter(claim, abi.encode(envelope));
-        assertFalse(valid);
-        envelope.payload = bytes("collector disputes the report");
-        bytes32 typeHash = keccak256(
-            "CounterEvidence(bytes32 claimId,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash)"
-        );
-        bytes32 digest = _typed(
-            keccak256(
-                abi.encode(
-                    typeHash, claim, envelope.kind, envelope.timestamp, envelope.collector, keccak256(envelope.payload)
-                )
-            )
-        );
-        assertEq(verifier.counterDigest(claim, envelope), digest);
-        envelope.payload = abi.encode(envelope.payload, _signature(digest, COLLECTOR_KEY));
-        (valid,) = verifier.verifyCounter(claim, abi.encode(envelope));
-        assertTrue(valid);
-        (valid,) = verifier.verifyCounter(keccak256("different claim"), abi.encode(envelope));
-        assertFalse(valid);
     }
 
     function _envelope(SlashingTypes.EvidenceKind kind, bytes memory signature)

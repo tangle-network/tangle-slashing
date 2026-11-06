@@ -8,9 +8,4 @@ interface IEvidenceVerifier {
         external
         view
         returns (bool valid, uint256 adjustedSeverityBps, string memory description);
-
-    function verifyCounter(bytes32 claimId, bytes calldata counterEvidence)
-        external
-        view
-        returns (bool valid, string memory description);
 }
