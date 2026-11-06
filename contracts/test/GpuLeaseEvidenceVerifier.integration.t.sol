@@ -16,24 +16,6 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
         vm.warp(1_000_000);
     }
 
-    function testUnsignedDeviceAttestationCannotSlash() public view {
-        _reject(
-            SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED,
-            _envelope(SlashingTypes.EvidenceKind.DEVICE_ATTESTATION, ""),
-            SERVICE,
-            OPERATOR
-        );
-    }
-
-    function testWronglySignedUptimeLogCannotSlash() public view {
-        _reject(
-            SlashingTypes.ViolationType.SERVICE_UNAVAILABLE,
-            _envelope(SlashingTypes.EvidenceKind.UPTIME_LOG, new bytes(65)),
-            SERVICE,
-            OPERATOR
-        );
-    }
-
     function testBothKindsRequireTheConfiguredCollector() public {
         for (uint8 i; i < 2; ++i) {
             SlashingTypes.ViolationType violation = i == 0
@@ -42,6 +24,7 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
             SlashingTypes.EvidenceKind kind =
                 i == 0 ? SlashingTypes.EvidenceKind.DEVICE_ATTESTATION : SlashingTypes.EvidenceKind.UPTIME_LOG;
             _reject(violation, _envelope(kind, ""), SERVICE, OPERATOR);
+            _reject(violation, _envelope(kind, new bytes(65)), SERVICE, OPERATOR);
             SlashingTypes.EvidenceEnvelope memory envelope = _signed(violation, kind, COLLECTOR_KEY);
             (bool valid, uint256 severity,) = verifier.verify(violation, abi.encode(envelope), SERVICE, OPERATOR);
             assertTrue(valid);
@@ -96,6 +79,52 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
         }
     }
 
+    function testMatchingDevicePayloadDoesNotProveInvalidAttestation() public {
+        SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.ATTESTATION_INVALID;
+        SlashingTypes.EvidenceEnvelope memory envelope = _envelope(SlashingTypes.EvidenceKind.DEVICE_ATTESTATION, "");
+        bytes32 uuid = keccak256("delivered device");
+        envelope.payload = abi.encode(
+            GpuLeaseEvidenceVerifier.ExpectedDevice("nvidia-h100", false, uuid),
+            GpuLeaseEvidenceVerifier.ActualDevice("nvidia-h100", uuid, 80_000, "reported-driver")
+        );
+        envelope.payload =
+            abi.encode(envelope.payload, _signature(_digest(violation, envelope, SERVICE, OPERATOR), COLLECTOR_KEY));
+        (bool valid, uint256 severity,) = verifier.verify(violation, abi.encode(envelope), SERVICE, OPERATOR);
+        assertFalse(valid, "matching device payload was treated as an invalid attestation");
+        assertEq(severity, 0, "no invalid attestation was proven but full stake was recommended");
+    }
+
+    function testOpaqueCollectorPayloadDoesNotProveInvalidAttestation() public {
+        _reject(
+            SlashingTypes.ViolationType.ATTESTATION_INVALID,
+            _signed(
+                SlashingTypes.ViolationType.ATTESTATION_INVALID,
+                SlashingTypes.EvidenceKind.DEVICE_ATTESTATION,
+                COLLECTOR_KEY
+            ),
+            SERVICE,
+            OPERATOR
+        );
+    }
+
+    function testOnlyCollectorAdminCanRotateAndRevokeSigningKeys() public {
+        SlashingTypes.ViolationType violation = SlashingTypes.ViolationType.SERVICE_NOT_DELIVERED;
+        SlashingTypes.EvidenceEnvelope memory old =
+            _signed(violation, SlashingTypes.EvidenceKind.DEVICE_ATTESTATION, COLLECTOR_KEY);
+        vm.prank(OPERATOR);
+        vm.expectRevert();
+        verifier.setCollector(vm.addr(0xbad), true);
+        verifier.setCollector(vm.addr(0xbad), true);
+        verifier.setCollector(vm.addr(COLLECTOR_KEY), false);
+        _reject(violation, old, SERVICE, OPERATOR);
+        old.collector = vm.addr(0xbad);
+        old.payload = bytes("unreachable");
+        old.payload = abi.encode(old.payload, _signature(_digest(violation, old, SERVICE, OPERATOR), 0xbad));
+        (bool valid, uint256 severity,) = verifier.verify(violation, abi.encode(old), SERVICE, OPERATOR);
+        assertTrue(valid);
+        assertEq(severity, 500);
+    }
+
     function _envelope(SlashingTypes.EvidenceKind kind, bytes memory signature)
         internal
         view
@@ -126,23 +155,18 @@ contract GpuLeaseEvidenceIntegrationTest is Test {
         bytes32 typeHash = keccak256(
             "Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)"
         );
-        return _typed(
-            keccak256(
-                abi.encode(
-                    typeHash,
-                    violation,
-                    envelope.kind,
-                    envelope.timestamp,
-                    envelope.collector,
-                    keccak256(envelope.payload),
-                    serviceId,
-                    operator
-                )
+        bytes32 structHash = keccak256(
+            abi.encode(
+                typeHash,
+                violation,
+                envelope.kind,
+                envelope.timestamp,
+                envelope.collector,
+                keccak256(envelope.payload),
+                serviceId,
+                operator
             )
         );
-    }
-
-    function _typed(bytes32 structHash) internal view returns (bytes32) {
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),

@@ -1,51 +1,38 @@
 # Tangle Slashing
 
-Domain evidence verification and Blueprint Service Manager helpers for tnt-core's
-native slashing lifecycle. tnt-core owns proposal bonds, disputes, execution,
-and staking; this package supplies the evidence verdict and hook helpers.
+Evidence admission for TNT's native proposal, dispute and staking lifecycle.
+[`SlashingTypes`](contracts/src/SlashingTypes.sol) owns violation severity caps.
 
-`SlashingTypes.defaultSeverityCap` owns the supported violations and their caps.
+## Collector evidence
 
-## GPU collector signatures
+Deploy `GpuLeaseEvidenceVerifier(initialCollector)`. Its deployer manages the
+collector set with `setCollector`; revocation rejects that key's signatures.
+Collector signatures retain the EIP-712 domain `GpuLeaseEvidenceVerifier`, version
+`1`, chain ID and verifier address, with this unchanged type:
 
-Deploy `new GpuLeaseEvidenceVerifier(trustedCollector)` with a nonzero collector
-address whose measurements your blueprint trusts. Changing collectors requires
-a new verifier; inherited BSM administration can select that verifier.
+`Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)`
 
-The existing `SlashingTypes.EvidenceEnvelope` ABI is retained. To submit evidence:
+Sign `evidenceDigest` using the raw payload, then wrap it as
+`abi.encode(rawPayload, signature)` in `EvidenceEnvelope.payload`. Signatures are
+canonical 65-byte `(r,s,v)` with `v` equal to 27 or 28. Zero/future timestamps fail authentication.
+For native submission, the envelope's `serviceId` is the manager's
+`evidenceContext(nativeServiceId)`, binding core, manager and native ID.
 
-1. Populate the envelope with its evidence kind, collection timestamp, designated
-   collector, and **raw** domain payload.
-2. Obtain `evidenceDigest(violation, envelope, serviceId, operator)` and sign that
-   EIP-712 digest with the collector's key. The type is
-   `Evidence(uint8 violation,uint8 kind,uint64 timestamp,address collector,bytes32 payloadHash,bytes32 serviceId,address operator)`.
-3. Replace `envelope.payload` with `abi.encode(rawPayload, signature)` and pass
-   `abi.encode(envelope)` to `verify` through `IEvidenceVerifier`.
+`ComputeProviderSlashing.submitEvidence` verifies before locking a pending hash
+and calling TNT's nonpayable `proposeSlash` with the verdict in basis points.
+Native failure rolls back admission. Pending evidence cannot be replaced;
+consumed hashes cannot be replayed after execution. The constructor and existing
+consumer hook helpers remain; duplicate policy/reputation state is retired in
+favor of TNT. A manager exposes its existing `tangleCore()` getter.
 
-The domain is `GpuLeaseEvidenceVerifier`, version `1`, with the current chain id
-and verifier address. Signatures are canonical 65-byte secp256k1 `(r,s,v)` with
-`v` equal to 27 or 28. Every verdict authenticates the configured collector;
-unsigned legacy envelopes cannot support slashing. Zero or future timestamps
-are rejected. The collector attests that the signed event happened during the
-paid service period; this reference contract cannot independently observe a GPU
-or look up a lease's period.
-
-A verdict is a stateless assessment: replay within the same claim is handled by
-tnt-core's slashing lifecycle, not by this view contract. The unused speculative
-counter-verdict API and parallel claim lifecycle types have been removed; BSM
-counter-evidence submission remains an input to governance review.
-
-`ComputeProviderSlashing` provides internal origin, window, recording and admin
-helpers for a BSM to connect to tnt-core. Its `submitEvidence` records a hash;
-it does not execute a slash or validate an envelope. Governance or the dispute
-resolver calls the registered verifier before assessing a claim.
+Collector endorsement alone does not prove an invalid operator attestation.
+`ATTESTATION_INVALID` remains unsupported until an authenticated report-verification
+contract is available; matching-device and opaque payloads cannot claim its cap.
 
 ## Checks
 
-```sh
-forge soldeer install
-forge test
-```
+Run `forge soldeer install && forge test`. Native TNT integration is proved by the
+separate pinned test project in the owning TNT repository.
 
 ## License
 
