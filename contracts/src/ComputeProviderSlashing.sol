@@ -4,28 +4,6 @@ pragma solidity ^0.8.26;
 import { SlashingTypes } from "./SlashingTypes.sol";
 
 /// @notice Shared evidence records, severity policy, and tnt-core hook helpers.
-abstract contract you implement.
-/// Inherit from this in your compute blueprint's BSM and you get:
-///
-///   ✓ All tnt-core IBlueprintServiceManager slashing hooks implemented
-///   ✓ Evidence verification via your registered verifier
-///   ✓ Slash history + operator reputation tracking
-///   ✓ Severity caps per violation type (governance-updatable)
-///   ✓ Per-service slashing origin (who can accuse)
-///   ✓ Per-service dispute window customization
-///
-/// The only thing YOU provide is the evidence verifier — the contract
-/// that knows how to interpret your domain's evidence (GPU identity,
-/// model output, storage proof, etc.).
-///
-/// Usage:
-/// ```solidity
-/// contract MyComputeBlueprint is ComputeProviderSlashing {
-///     constructor(address verifier) ComputeProviderSlashing(verifier) {}
-/// }
-/// ```
-///
-/// That's it. Your blueprint now has slashing.
 abstract contract ComputeProviderSlashing {
     using SlashingTypes for *;
 
