@@ -8,4 +8,12 @@ interface IEvidenceVerifier {
         external
         view
         returns (bool valid, uint256 adjustedSeverityBps, string memory description);
+
+    /// @notice The collector-signed digest; encodings of the same signed evidence share it.
+    function replayKey(
+        SlashingTypes.ViolationType violation,
+        bytes calldata evidence,
+        bytes32 serviceId,
+        address operator
+    ) external view returns (bytes32);
 }
